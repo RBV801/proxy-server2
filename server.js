@@ -9,13 +9,11 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
-async function searchTMDB(query) {
+async function searchTMDB(query, page = 1) {
     try {
-        const url = `https://api.themoviedb.org/3/search/movie?api_key=${process.env.TMDB_API_KEY}&query=${encodeURIComponent(query)}`;
-        console.log('TMDB Search URL:', url);
+        const url = `https://api.themoviedb.org/3/search/movie?api_key=${process.env.TMDB_API_KEY}&query=${encodeURIComponent(query)}&page=${page}&include_adult=false`;
         const response = await fetch(url);
         const data = await response.json();
-        console.log('TMDB Search Results:', data);
         return data;
     } catch (error) {
         console.error('TMDB Search Error:', error);
@@ -25,11 +23,9 @@ async function searchTMDB(query) {
 
 async function getMovieDetails(tmdbId) {
     try {
-        const url = `https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${process.env.TMDB_API_KEY}&append_to_response=keywords`;
-        console.log('TMDB Details URL:', url);
+        const url = `https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${process.env.TMDB_API_KEY}&append_to_response=keywords,watch/providers`;
         const response = await fetch(url);
         const data = await response.json();
-        console.log('TMDB Details Results:', data);
         return data;
     } catch (error) {
         console.error('TMDB Details Error:', error);
@@ -37,59 +33,132 @@ async function getMovieDetails(tmdbId) {
     }
 }
 
+async function searchOMDB(query, page = 1) {
+    try {
+        const url = `http://www.omdbapi.com/?s=${encodeURIComponent(query)}&apikey=${process.env.OMDB_API_KEY}&page=${page}`;
+        const response = await fetch(url);
+        const data = await response.json();
+        return data;
+    } catch (error) {
+        console.error('OMDB Search Error:', error);
+        throw error;
+    }
+}
+
+async function getOMDBDetails(imdbId) {
+    try {
+        const url = `http://www.omdbapi.com/?i=${imdbId}&apikey=${process.env.OMDB_API_KEY}`;
+        const response = await fetch(url);
+        const data = await response.json();
+        return data;
+    } catch (error) {
+        console.error('OMDB Details Error:', error);
+        throw error;
+    }
+}
+
+function normalizeTitle(title) {
+    return title.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function calculateRecommendationScore(movie) {
+    let score = 0;
+    
+    // Base score from TMDb popularity and vote average
+    if (movie.tmdbData) {
+        score += (movie.tmdbData.popularity || 0) * 0.5;
+        score += (movie.tmdbData.vote_average || 0) * 10;
+        score += (movie.tmdbData.vote_count || 0) * 0.01;
+    }
+    
+    // Additional score from IMDb rating
+    if (movie.omdbData && movie.omdbData.imdbRating) {
+        score += parseFloat(movie.omdbData.imdbRating) * 10;
+    }
+    
+    return Math.round(score);
+}
+
 app.get('/api/search', async (req, res) => {
     try {
-        const { query } = req.query;
+        const { query, page = 1 } = req.query;
         if (!query) {
             return res.status(400).json({ error: 'Search query is required' });
         }
 
-        console.log('Starting search with query:', query);
-        console.log('Using TMDB API Key:', process.env.TMDB_API_KEY);
-
-        const [omdbResponse, tmdbResponse] = await Promise.all([
-            fetch(`http://www.omdbapi.com/?s=${query}&apikey=${process.env.OMDB_API_KEY}`),
-            searchTMDB(query)
+        // Fetch initial results from both APIs
+        const [tmdbResponse, omdbResponse] = await Promise.all([
+            searchTMDB(query, page),
+            searchOMDB(query, page)
         ]);
 
-        const [omdbData, tmdbData] = await Promise.all([
-            omdbResponse.json(),
-            tmdbResponse
-        ]);
+        // Create a map to store merged results
+        const mergedResults = new Map();
 
-        console.log('OMDB Data:', omdbData);
-        console.log('TMDB Data:', tmdbData);
-
-        const tmdbDetails = await Promise.all(
-            tmdbData.results?.slice(0, 5).map(movie => getMovieDetails(movie.id)) || []
-        );
-
-        const enrichedResults = [];
-        
-        if (omdbData.Search) {
-            for (const omdbMovie of omdbData.Search) {
-                const tmdbMatch = tmdbDetails.find(t => 
-                    t.title?.toLowerCase() === omdbMovie.Title.toLowerCase()
-                );
-
-                enrichedResults.push({
-                    ...omdbMovie,
-                    overview: tmdbMatch?.overview || '',
-                    genres: tmdbMatch?.genres?.map(g => g.name) || [],
-                    keywords: tmdbMatch?.keywords?.keywords?.map(k => k.name) || [],
-                    rating: tmdbMatch?.vote_average || null
-                });
+        // Process TMDb results
+        if (tmdbResponse.results) {
+            for (const movie of tmdbResponse.results) {
+                const normalizedTitle = normalizeTitle(movie.title);
+                if (!mergedResults.has(normalizedTitle)) {
+                    const details = await getMovieDetails(movie.id);
+                    mergedResults.set(normalizedTitle, {
+                        id: movie.id,
+                        title: movie.title,
+                        tmdbData: {
+                            ...details,
+                            streamingProviders: details['watch/providers']?.results?.US || {},
+                        },
+                        year: movie.release_date ? movie.release_date.substring(0, 4) : null,
+                        type: 'movie',
+                        keywords: details.keywords?.keywords?.map(k => k.name) || [],
+                        genres: details.genres?.map(g => g.name) || []
+                    });
+                }
             }
         }
 
-        console.log('Enriched Results:', enrichedResults);
-        res.json({ Search: enrichedResults });
+        // Process OMDB results
+        if (omdbResponse.Search) {
+            for (const movie of omdbResponse.Search) {
+                const normalizedTitle = normalizeTitle(movie.Title);
+                if (mergedResults.has(normalizedTitle)) {
+                    // Enrich existing entry with OMDB data
+                    const details = await getOMDBDetails(movie.imdbID);
+                    mergedResults.get(normalizedTitle).omdbData = details;
+                } else {
+                    // Create new entry
+                    mergedResults.set(normalizedTitle, {
+                        title: movie.Title,
+                        omdbData: await getOMDBDetails(movie.imdbID),
+                        year: movie.Year,
+                        type: movie.Type,
+                        poster: movie.Poster
+                    });
+                }
+            }
+        }
+
+        // Convert map to array and calculate recommendation scores
+        const results = Array.from(mergedResults.values()).map(movie => ({
+            ...movie,
+            recommendationScore: calculateRecommendationScore(movie)
+        }));
+
+        // Sort by recommendation score
+        results.sort((a, b) => b.recommendationScore - a.recommendationScore);
+
+        res.json({
+            totalResults: results.length,
+            Search: results,
+            currentPage: parseInt(page),
+            hasMore: tmdbResponse.total_pages > page || (omdbResponse.totalResults > page * 10)
+        });
+
     } catch (error) {
         console.error('Proxy server error:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        res.status(500).json({ 
+            error: 'Internal server error',
+            message: error.message 
+        });
     }
-});
-
-app.listen(PORT, () => {
-    console.log(`Proxy server running on port ${PORT}`);
 });
