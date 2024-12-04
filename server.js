@@ -9,16 +9,45 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
+// Request logging middleware
+app.use((req, res, next) => {
+    const startTime = Date.now();
+    console.log(`\n[${new Date().toISOString()}] ${req.method} ${req.url}`);
+    console.log('Query params:', req.query);
+
+    // Log response
+    const originalJson = res.json;
+    res.json = function(body) {
+        const endTime = Date.now();
+        console.log(`Response time: ${endTime - startTime}ms`);
+        console.log('Response size:', JSON.stringify(body).length, 'bytes');
+        console.log('Total results:', body.totalResults || 0);
+        return originalJson.call(this, body);
+    };
+    next();
+});
+
+// API error logging
+const logApiCall = async (name, url) => {
+    console.log(`\n[${new Date().toISOString()}] API Call: ${name}`);
+    console.log('URL:', url);
+};
+
 async function searchTMDB(query, page = 1) {
     try {
         const keywords = query.toLowerCase().split(' ')
             .filter(word => !['with', 'and', 'the', 'a', 'an', 'in', 'on', 'at', 'to', 'for', 'of'].includes(word));
         
-        const requests = keywords.map(keyword =>
-            fetch(`https://api.themoviedb.org/3/search/movie?api_key=${process.env.TMDB_API_KEY}&query=${encodeURIComponent(keyword)}&page=${page}&include_adult=false`)
-                .then(res => res.json())
-                .catch(err => ({ results: [] }))
-        );
+        console.log('Processing keywords:', keywords);
+        
+        const requests = keywords.map(async keyword => {
+            const url = `https://api.themoviedb.org/3/search/movie?api_key=${process.env.TMDB_API_KEY}&query=${encodeURIComponent(keyword)}&page=${page}&include_adult=false`;
+            await logApiCall('TMDB Search', url);
+            const response = await fetch(url);
+            const data = await response.json();
+            console.log(`Results for "${keyword}": ${data.results?.length || 0}`);
+            return data;
+        });
 
         const responses = await Promise.all(requests);
         
@@ -40,6 +69,9 @@ async function searchTMDB(query, page = 1) {
             .sort((a, b) => (b.score * b.popularity) - (a.score * a.popularity))
             .slice(0, 20);
 
+        console.log('Total unique movies found:', movieMap.size);
+        console.log('Returning top results:', results.length);
+
         return { results, total_pages: Math.ceil(results.length / 20) };
     } catch (error) {
         console.error('TMDB Search Error:', error);
@@ -50,6 +82,7 @@ async function searchTMDB(query, page = 1) {
 async function getMovieDetails(tmdbId) {
     try {
         const url = `https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${process.env.TMDB_API_KEY}&append_to_response=keywords,watch/providers`;
+        await logApiCall('TMDB Details', url);
         const response = await fetch(url);
         const data = await response.json();
         return data;
@@ -62,8 +95,10 @@ async function getMovieDetails(tmdbId) {
 async function searchOMDB(query) {
     try {
         const url = `https://www.omdbapi.com/?s=${encodeURIComponent(query)}&apikey=${process.env.OMDB_API_KEY}&type=movie`;
+        await logApiCall('OMDB Search', url);
         const response = await fetch(url);
         const data = await response.json();
+        console.log('OMDB results:', data.Search?.length || 0);
         return data;
     } catch (error) {
         console.error('OMDB Search Error:', error);
@@ -74,6 +109,7 @@ async function searchOMDB(query) {
 async function getOMDBDetails(imdbId) {
     try {
         const url = `https://www.omdbapi.com/?i=${imdbId}&apikey=${process.env.OMDB_API_KEY}`;
+        await logApiCall('OMDB Details', url);
         const response = await fetch(url);
         const data = await response.json();
         return data;
@@ -90,11 +126,15 @@ app.get('/api/search', async (req, res) => {
             return res.status(400).json({ error: 'Search query is required' });
         }
 
+        console.log('\nStarting search process...');
+        const startTime = Date.now();
+
         const [omdbData, tmdbData] = await Promise.all([
             searchOMDB(query),
             searchTMDB(query, page)
         ]);
 
+        console.log('\nFetching movie details...');
         const tmdbDetails = await Promise.all(
             tmdbData.results.map(movie => getMovieDetails(movie.id))
         );
@@ -102,6 +142,7 @@ app.get('/api/search', async (req, res) => {
         const enrichedResults = [];
         const processedTitles = new Set();
 
+        console.log('\nProcessing TMDB results...');
         for (const tmdbMovie of tmdbDetails) {
             if (!tmdbMovie) continue;
             const normalizedTitle = tmdbMovie.title.toLowerCase();
@@ -126,6 +167,7 @@ app.get('/api/search', async (req, res) => {
             }
         }
 
+        console.log('\nProcessing OMDB results...');
         if (omdbData.Search) {
             for (const omdbMovie of omdbData.Search) {
                 const normalizedTitle = omdbMovie.Title.toLowerCase();
@@ -158,6 +200,10 @@ app.get('/api/search', async (req, res) => {
 
         enrichedResults.sort((a, b) => b.recommendationScore - a.recommendationScore);
 
+        const endTime = Date.now();
+        console.log(`\nTotal processing time: ${endTime - startTime}ms`);
+        console.log('Final results count:', enrichedResults.length);
+
         res.json({
             totalResults: enrichedResults.length,
             Search: enrichedResults,
@@ -165,7 +211,7 @@ app.get('/api/search', async (req, res) => {
             hasMore: false
         });
     } catch (error) {
-        console.error('Proxy server error:', error);
+        console.error('\nProxy server error:', error);
         res.status(500).json({
             error: 'Internal server error',
             message: error.message,
@@ -176,4 +222,7 @@ app.get('/api/search', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`Proxy server running on port ${PORT}`);});
+    console.log(`\nServer started at ${new Date().toISOString()}`);
+    console.log(`Listening on port ${PORT}`);
+    console.log('Environment:', process.env.NODE_ENV || 'development');
+});
