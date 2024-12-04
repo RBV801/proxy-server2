@@ -15,16 +15,51 @@ const CACHE_DURATION = 3600000; // 1 hour
 function normalizeSearchTerms(query) {
   if (!query) return [];
   
-  const terms = new Set([query.toLowerCase()]);
+  // Clean the query
+  const cleanQuery = query.toLowerCase().trim();
+  const stopWords = new Set(['the', 'and', 'for', 'with', 'in', 'on', 'at', 'to']);
   
-  // Add individual words as terms if they're meaningful
-  query.toLowerCase().split(' ').forEach(word => {
-    if (word.length > 2 && !['the', 'and', 'for', 'with'].includes(word)) {
-      terms.add(word);
+  // Keep original query for exact matches
+  const terms = new Set([cleanQuery]);
+  
+  // Add meaningful individual words
+  cleanQuery.split(' ').forEach(word => {
+    const cleanWord = word.trim();
+    if (cleanWord.length > 2 && !stopWords.has(cleanWord)) {
+      terms.add(cleanWord);
     }
   });
 
   return Array.from(terms);
+}
+
+function calculateRelevanceScore(movie, searchTerm, movieTitle = '', castNames = []) {
+  let score = 0;
+  const term = searchTerm.toLowerCase();
+  
+  // Exact title match gets highest score
+  if (movieTitle.toLowerCase() === term) {
+    score += 1000;
+  }
+  // Title contains search term
+  else if (movieTitle.toLowerCase().includes(term)) {
+    score += 500;
+  }
+  
+  // Cast name exact match
+  if (castNames.some(name => name.toLowerCase() === term)) {
+    score += 800;
+  }
+  // Cast name contains search term
+  else if (castNames.some(name => name.toLowerCase().includes(term))) {
+    score += 400;
+  }
+
+  // Add baseline popularity and rating scores but with lower weight
+  score += (movie.popularity || 0) * 0.1;
+  score += (movie.vote_average || 0) * 5;
+
+  return score;
 }
 
 async function searchPerson(term) {
@@ -41,21 +76,36 @@ async function searchPerson(term) {
     }
     
     const data = await response.json();
-    
     if (!data.results) return new Map();
 
     const movieMap = new Map();
     for (const person of data.results) {
-      if (person.known_for) {
-        for (const movie of person.known_for) {
-          if (movie.media_type === 'movie') {
-            movieMap.set(movie.id, {
-              ...movie,
-              matchedTerms: new Set([term]),
-              score: person.popularity,
-              popularity: movie.popularity || 1
-            });
-          }
+      // Get detailed person info to get known movies
+      const personDetailsResponse = await fetch(
+        `https://api.themoviedb.org/3/person/${person.id}?api_key=${process.env.TMDB_API_KEY}&append_to_response=combined_credits`
+      );
+      
+      if (!personDetailsResponse.ok) continue;
+      
+      const personDetails = await personDetailsResponse.json();
+      const movieCredits = personDetails.combined_credits?.cast || [];
+      
+      for (const movie of movieCredits) {
+        if (movie.media_type === 'movie') {
+          const relevanceScore = calculateRelevanceScore(
+            movie,
+            term,
+            movie.title,
+            [person.name]
+          );
+
+          movieMap.set(movie.id, {
+            ...movie,
+            matchedTerms: new Set([term]),
+            castMatches: [person.name],
+            score: relevanceScore,
+            popularity: movie.popularity || 1
+          });
         }
       }
     }
@@ -81,15 +131,33 @@ async function searchMovies(term) {
     }
     
     const data = await response.json();
-    
     if (!data.results) return new Map();
 
     const movieMap = new Map();
     for (const movie of data.results) {
+      // Get movie credits to match cast
+      const creditsResponse = await fetch(
+        `https://api.themoviedb.org/3/movie/${movie.id}/credits?api_key=${process.env.TMDB_API_KEY}`
+      );
+      
+      let castNames = [];
+      if (creditsResponse.ok) {
+        const credits = await creditsResponse.json();
+        castNames = credits.cast?.map(actor => actor.name) || [];
+      }
+
+      const relevanceScore = calculateRelevanceScore(
+        movie,
+        term,
+        movie.title,
+        castNames
+      );
+
       movieMap.set(movie.id, {
         ...movie,
         matchedTerms: new Set([term]),
-        score: movie.vote_average || 1,
+        castNames,
+        score: relevanceScore,
         popularity: movie.popularity || 1
       });
     }
@@ -130,29 +198,32 @@ async function searchTMDB(query, page = 1) {
         searchPerson(term)
       ]);
 
+      // Merge movie results
       for (const [id, movie] of movieResults) {
         if (results.has(id)) {
-          results.get(id).matchedTerms.add(term);
-          results.get(id).score += movie.score;
+          const existing = results.get(id);
+          existing.matchedTerms.add(term);
+          existing.score += movie.score;
         } else {
           results.set(id, movie);
         }
       }
       
+      // Merge person results
       for (const [id, movie] of personResults) {
         if (results.has(id)) {
-          for (const term of movie.matchedTerms) {
-            results.get(id).matchedTerms.add(term);
-          }
-          results.get(id).score += movie.score * 2;
+          const existing = results.get(id);
+          movie.matchedTerms.forEach(term => existing.matchedTerms.add(term));
+          existing.score += movie.score;
+          existing.castMatches = [...(existing.castMatches || []), ...(movie.castMatches || [])];
         } else {
-          results.set(id, { ...movie, score: movie.score * 2 });
+          results.set(id, movie);
         }
       }
     }
 
     let sortedResults = Array.from(results.values())
-      .sort((a, b) => (b.score * b.popularity) - (a.score * a.popularity));
+      .sort((a, b) => b.score - a.score);
       
     if (query.toLowerCase().includes('latest')) {
       sortedResults = sortedResults.sort((a, b) => 
@@ -183,10 +254,11 @@ async function getMovieDetails(tmdbId) {
   if (!tmdbId) return null;
   
   try {
-    const [detailsResponse, keywordsResponse, providersResponse] = await Promise.all([
+    const [detailsResponse, keywordsResponse, providersResponse, creditsResponse] = await Promise.all([
       fetch(`https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${process.env.TMDB_API_KEY}`),
       fetch(`https://api.themoviedb.org/3/movie/${tmdbId}/keywords?api_key=${process.env.TMDB_API_KEY}`),
-      fetch(`https://api.themoviedb.org/3/movie/${tmdbId}/watch/providers?api_key=${process.env.TMDB_API_KEY}`)
+      fetch(`https://api.themoviedb.org/3/movie/${tmdbId}/watch/providers?api_key=${process.env.TMDB_API_KEY}`),
+      fetch(`https://api.themoviedb.org/3/movie/${tmdbId}/credits?api_key=${process.env.TMDB_API_KEY}`)
     ]);
 
     if (!detailsResponse.ok) {
@@ -194,16 +266,18 @@ async function getMovieDetails(tmdbId) {
       return null;
     }
 
-    const [details, keywords, providers] = await Promise.all([
+    const [details, keywords, providers, credits] = await Promise.all([
       detailsResponse.json(),
       keywordsResponse.ok ? keywordsResponse.json() : { keywords: [] },
-      providersResponse.ok ? providersResponse.json() : { results: {} }
+      providersResponse.ok ? providersResponse.json() : { results: {} },
+      creditsResponse.ok ? creditsResponse.json() : { cast: [], crew: [] }
     ]);
 
     return {
       ...details,
       keywords,
-      'watch/providers': providers
+      'watch/providers': providers,
+      credits
     };
   } catch (error) {
     console.error('Error in getMovieDetails:', error);
@@ -239,13 +313,20 @@ app.get('/api/search', async (req, res) => {
 
         const keywords = tmdbMovie.keywords?.keywords?.map(k => k.name) || [];
         const genres = tmdbMovie.genres?.map(g => g.name) || [];
+        const cast = tmdbMovie.credits?.cast?.map(c => c.name) || [];
+        const castDetails = tmdbMovie.credits?.cast?.map(c => ({
+          name: c.name,
+          character: c.character,
+          order: c.order
+        })) || [];
 
         let recommendationScore = Math.round(
           (tmdbMovie.vote_average * 10) + 
           (tmdbMovie.popularity * 0.1) +
           (tmdbMovie.vote_count * 0.01) +
           (keywords.some(k => query.toLowerCase().includes(k.toLowerCase())) ? 50 : 0) +
-          (genres.some(g => query.toLowerCase().includes(g.toLowerCase())) ? 30 : 0)
+          (genres.some(g => query.toLowerCase().includes(g.toLowerCase())) ? 30 : 0) +
+          (cast.some(name => query.toLowerCase().includes(name.toLowerCase())) ? 100 : 0)
         );
 
         enrichedResults.push({
@@ -258,6 +339,7 @@ app.get('/api/search', async (req, res) => {
           },
           keywords,
           genres,
+          cast: castDetails,
           recommendationScore
         });
       }
@@ -287,4 +369,3 @@ app.get('/api/search', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Proxy server running on port ${PORT}`);
-});
