@@ -10,19 +10,40 @@ app.use(cors());
 app.use(express.json());
 
 const searchCache = new Map();
-const CACHE_DURATION = 3600000; // 1 hour
+const CACHE_DURATION = 3600000;
+
+function calculateRelevanceScore(movie, searchTerm, movieTitle = '', castNames = []) {
+  let score = 0;
+  const term = searchTerm.toLowerCase();
+  
+  if (movieTitle.toLowerCase() === term) {
+    score += 1000;
+  }
+  else if (movieTitle.toLowerCase().includes(term)) {
+    score += 500;
+  }
+  
+  if (castNames.some(name => name.toLowerCase() === term)) {
+    score += 800;
+  }
+  else if (castNames.some(name => name.toLowerCase().includes(term))) {
+    score += 400;
+  }
+
+  score += (movie.popularity || 0) * 0.1;
+  score += (movie.vote_average || 0) * 5;
+
+  return score;
+}
 
 function normalizeSearchTerms(query) {
   if (!query) return [];
   
-  // Clean the query
   const cleanQuery = query.toLowerCase().trim();
   const stopWords = new Set(['the', 'and', 'for', 'with', 'in', 'on', 'at', 'to']);
   
-  // Keep original query for exact matches
   const terms = new Set([cleanQuery]);
   
-  // Add meaningful individual words
   cleanQuery.split(' ').forEach(word => {
     const cleanWord = word.trim();
     if (cleanWord.length > 2 && !stopWords.has(cleanWord)) {
@@ -31,35 +52,6 @@ function normalizeSearchTerms(query) {
   });
 
   return Array.from(terms);
-}
-
-function calculateRelevanceScore(movie, searchTerm, movieTitle = '', castNames = []) {
-  let score = 0;
-  const term = searchTerm.toLowerCase();
-  
-  // Exact title match gets highest score
-  if (movieTitle.toLowerCase() === term) {
-    score += 1000;
-  }
-  // Title contains search term
-  else if (movieTitle.toLowerCase().includes(term)) {
-    score += 500;
-  }
-  
-  // Cast name exact match
-  if (castNames.some(name => name.toLowerCase() === term)) {
-    score += 800;
-  }
-  // Cast name contains search term
-  else if (castNames.some(name => name.toLowerCase().includes(term))) {
-    score += 400;
-  }
-
-  // Add baseline popularity and rating scores but with lower weight
-  score += (movie.popularity || 0) * 0.1;
-  score += (movie.vote_average || 0) * 5;
-
-  return score;
 }
 
 async function searchPerson(term) {
@@ -80,7 +72,6 @@ async function searchPerson(term) {
 
     const movieMap = new Map();
     for (const person of data.results) {
-      // Get detailed person info to get known movies
       const personDetailsResponse = await fetch(
         `https://api.themoviedb.org/3/person/${person.id}?api_key=${process.env.TMDB_API_KEY}&append_to_response=combined_credits`
       );
@@ -135,7 +126,6 @@ async function searchMovies(term) {
 
     const movieMap = new Map();
     for (const movie of data.results) {
-      // Get movie credits to match cast
       const creditsResponse = await fetch(
         `https://api.themoviedb.org/3/movie/${movie.id}/credits?api_key=${process.env.TMDB_API_KEY}`
       );
@@ -198,7 +188,6 @@ async function searchTMDB(query, page = 1) {
         searchPerson(term)
       ]);
 
-      // Merge movie results
       for (const [id, movie] of movieResults) {
         if (results.has(id)) {
           const existing = results.get(id);
@@ -209,7 +198,6 @@ async function searchTMDB(query, page = 1) {
         }
       }
       
-      // Merge person results
       for (const [id, movie] of personResults) {
         if (results.has(id)) {
           const existing = results.get(id);
@@ -369,3 +357,4 @@ app.get('/api/search', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Proxy server running on port ${PORT}`);
+});
