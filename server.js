@@ -12,35 +12,37 @@ app.use(express.json());
 const searchCache = new Map();
 const CACHE_DURATION = 3600000; // 1 hour
 
-async function parseSearchWithClaude(query) {
-  try {
-    // Default to simple search if claude integration fails
-    const terms = new Set([query.toLowerCase()]);
-    
-    // Add individual words as terms
-    query.toLowerCase().split(' ').forEach(word => {
-      if (word.length > 2) { // Only add words longer than 2 characters
-        terms.add(word);
-      }
-    });
+function normalizeSearchTerms(query) {
+  if (!query) return [];
+  
+  const terms = new Set([query.toLowerCase()]);
+  
+  // Add individual words as terms if they're meaningful
+  query.toLowerCase().split(' ').forEach(word => {
+    if (word.length > 2 && !['the', 'and', 'for', 'with'].includes(word)) {
+      terms.add(word);
+    }
+  });
 
-    return Array.from(terms);
-  } catch (error) {
-    console.error('Error parsing search with Claude:', error);
-    return [query.toLowerCase()]; // Fallback to original query
-  }
+  return Array.from(terms);
 }
 
 async function searchPerson(term) {
+  if (!term) return new Map();
+  
   try {
     const response = await fetch(
       `https://api.themoviedb.org/3/search/person?api_key=${process.env.TMDB_API_KEY}&query=${encodeURIComponent(term)}`
     );
-    const data = await response.json();
     
-    if (!data.results) {
+    if (!response.ok) {
+      console.error(`TMDB person search failed: ${response.status} ${response.statusText}`);
       return new Map();
     }
+    
+    const data = await response.json();
+    
+    if (!data.results) return new Map();
 
     const movieMap = new Map();
     for (const person of data.results) {
@@ -60,21 +62,27 @@ async function searchPerson(term) {
     
     return movieMap;
   } catch (error) {
-    console.error('Error searching person:', error);
+    console.error('Error in searchPerson:', error);
     return new Map();
   }
 }
 
 async function searchMovies(term) {
+  if (!term) return new Map();
+  
   try {
     const response = await fetch(
       `https://api.themoviedb.org/3/search/movie?api_key=${process.env.TMDB_API_KEY}&query=${encodeURIComponent(term)}`
     );
-    const data = await response.json();
     
-    if (!data.results) {
+    if (!response.ok) {
+      console.error(`TMDB movie search failed: ${response.status} ${response.statusText}`);
       return new Map();
     }
+    
+    const data = await response.json();
+    
+    if (!data.results) return new Map();
 
     const movieMap = new Map();
     for (const movie of data.results) {
@@ -88,12 +96,17 @@ async function searchMovies(term) {
     
     return movieMap;
   } catch (error) {
-    console.error('Error searching movies:', error);
+    console.error('Error in searchMovies:', error);
     return new Map();
   }
 }
 
 async function searchTMDB(query, page = 1) {
+  if (!query) {
+    console.error('No query provided to searchTMDB');
+    return { results: [], total_results: 0, total_pages: 0, page: 1 };
+  }
+
   try {
     const cacheKey = `search:${query}:${page}`;
     if (searchCache.has(cacheKey)) {
@@ -101,14 +114,20 @@ async function searchTMDB(query, page = 1) {
       if (Date.now() - cached.timestamp < CACHE_DURATION) return cached.data;
     }
 
-    const searchTerms = await parseSearchWithClaude(query);
-    console.log('Search terms:', searchTerms);
+    const searchTerms = normalizeSearchTerms(query);
+    console.log('Normalized search terms:', searchTerms);
     
+    if (!searchTerms.length) {
+      console.error('No valid search terms generated from query:', query);
+      return { results: [], total_results: 0, total_pages: 0, page: 1 };
+    }
+
     const results = new Map();
+    
     for (const term of searchTerms) {
       const [movieResults, personResults] = await Promise.all([
         searchMovies(term),
-        searchPerson(term)  
+        searchPerson(term)
       ]);
 
       for (const [id, movie] of movieResults) {
@@ -125,17 +144,15 @@ async function searchTMDB(query, page = 1) {
           for (const term of movie.matchedTerms) {
             results.get(id).matchedTerms.add(term);
           }
-          results.get(id).score += movie.score * 2; // Increase weight for person matches
+          results.get(id).score += movie.score * 2;
         } else {
-          results.set(id, { ...movie, score: movie.score * 2 }); // Increase weight for person matches
+          results.set(id, { ...movie, score: movie.score * 2 });
         }
       }
     }
 
     let sortedResults = Array.from(results.values())
-      .sort((a, b) => {
-        return (b.score * b.popularity) - (a.score * a.popularity);
-      });
+      .sort((a, b) => (b.score * b.popularity) - (a.score * a.popularity));
       
     if (query.toLowerCase().includes('latest')) {
       sortedResults = sortedResults.sort((a, b) => 
@@ -151,18 +168,20 @@ async function searchTMDB(query, page = 1) {
       results: paginatedResults, 
       total_results: sortedResults.length,
       total_pages: Math.ceil(sortedResults.length / 10),
-      page 
+      page
     };
     
     searchCache.set(cacheKey, { data, timestamp: Date.now() });
     return data;
   } catch (error) {
     console.error('Error in searchTMDB:', error);
-    throw error; // Re-throw to be handled by the route handler
+    throw error;
   }
 }
 
 async function getMovieDetails(tmdbId) {
+  if (!tmdbId) return null;
+  
   try {
     const [detailsResponse, keywordsResponse, providersResponse] = await Promise.all([
       fetch(`https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${process.env.TMDB_API_KEY}`),
@@ -170,10 +189,15 @@ async function getMovieDetails(tmdbId) {
       fetch(`https://api.themoviedb.org/3/movie/${tmdbId}/watch/providers?api_key=${process.env.TMDB_API_KEY}`)
     ]);
 
+    if (!detailsResponse.ok) {
+      console.error(`Failed to fetch movie details: ${detailsResponse.status} ${detailsResponse.statusText}`);
+      return null;
+    }
+
     const [details, keywords, providers] = await Promise.all([
       detailsResponse.json(),
-      keywordsResponse.json(),
-      providersResponse.json()
+      keywordsResponse.ok ? keywordsResponse.json() : { keywords: [] },
+      providersResponse.ok ? providersResponse.json() : { results: {} }
     ]);
 
     return {
@@ -182,7 +206,7 @@ async function getMovieDetails(tmdbId) {
       'watch/providers': providers
     };
   } catch (error) {
-    console.error('Error fetching movie details:', error);
+    console.error('Error in getMovieDetails:', error);
     return null;
   }
 }
@@ -190,13 +214,14 @@ async function getMovieDetails(tmdbId) {
 app.get('/api/search', async (req, res) => {
   try {
     const { query, page = 1 } = req.query;
+    console.log('Received search request:', { query, page });
+    
     if (!query) {
-      return res.status(400).json({ error: 'Search query is required' });    
+      return res.status(400).json({ error: 'Search query is required' });
     }
 
-    console.log('Received search query:', query, 'page:', page);
-
     const tmdbData = await searchTMDB(query, parseInt(page));
+    console.log(`Found ${tmdbData.total_results} total results`);
 
     const tmdbDetails = await Promise.all(
       tmdbData.results.map(movie => getMovieDetails(movie.id))
@@ -207,6 +232,7 @@ app.get('/api/search', async (req, res) => {
 
     for (const tmdbMovie of tmdbDetails) {
       if (!tmdbMovie) continue;
+      
       const normalizedTitle = tmdbMovie.title.toLowerCase();
       if (!processedTitles.has(normalizedTitle)) {
         processedTitles.add(normalizedTitle);
@@ -218,8 +244,8 @@ app.get('/api/search', async (req, res) => {
           (tmdbMovie.vote_average * 10) + 
           (tmdbMovie.popularity * 0.1) +
           (tmdbMovie.vote_count * 0.01) +
-          (keywords.some(k => query.toLowerCase().includes(k)) ? 50 : 0) +
-          (genres.some(g => query.toLowerCase().includes(g)) ? 30 : 0)
+          (keywords.some(k => query.toLowerCase().includes(k.toLowerCase())) ? 50 : 0) +
+          (genres.some(g => query.toLowerCase().includes(g.toLowerCase())) ? 30 : 0)
         );
 
         enrichedResults.push({
@@ -239,13 +265,16 @@ app.get('/api/search', async (req, res) => {
 
     enrichedResults.sort((a, b) => b.recommendationScore - a.recommendationScore);
 
-    res.json({
+    const response = {
       totalResults: tmdbData.total_results,
-      totalPages: tmdbData.total_pages, 
+      totalPages: tmdbData.total_pages,
       page: tmdbData.page,
       hasMore: tmdbData.page < tmdbData.total_pages,
       Search: enrichedResults
-    });
+    };
+
+    console.log(`Returning ${enrichedResults.length} enriched results`);
+    res.json(response);
   } catch (error) {
     console.error('Proxy server error:', error);
     res.status(500).json({ 
@@ -257,5 +286,5 @@ app.get('/api/search', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`Proxy server running on port ${PORT}`);
+  console.log(`Proxy server running on port ${PORT}`);
 });
