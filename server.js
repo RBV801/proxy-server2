@@ -11,19 +11,17 @@ app.use(express.json());
 
 async function searchTMDB(query, page = 1) {
     try {
-        // Process complex queries
         const keywords = query.toLowerCase().split(' ')
             .filter(word => !['with', 'and', 'the', 'a', 'an', 'in', 'on', 'at', 'to', 'for', 'of'].includes(word));
         
-        // Search by keywords and get more results
         const requests = keywords.map(keyword =>
             fetch(`https://api.themoviedb.org/3/search/movie?api_key=${process.env.TMDB_API_KEY}&query=${encodeURIComponent(keyword)}&page=${page}&include_adult=false`)
                 .then(res => res.json())
+                .catch(err => ({ results: [] }))
         );
 
         const responses = await Promise.all(requests);
         
-        // Merge and score results
         const movieMap = new Map();
         responses.forEach(response => {
             response.results?.forEach(movie => {
@@ -38,7 +36,6 @@ async function searchTMDB(query, page = 1) {
             });
         });
 
-        // Convert to array and sort by score and popularity
         const results = Array.from(movieMap.values())
             .sort((a, b) => (b.score * b.popularity) - (a.score * a.popularity))
             .slice(0, 20);
@@ -46,7 +43,7 @@ async function searchTMDB(query, page = 1) {
         return { results, total_pages: Math.ceil(results.length / 20) };
     } catch (error) {
         console.error('TMDB Search Error:', error);
-        throw error;
+        return { results: [], total_pages: 0 };
     }
 }
 
@@ -58,19 +55,19 @@ async function getMovieDetails(tmdbId) {
         return data;
     } catch (error) {
         console.error('TMDB Details Error:', error);
-        throw error;
+        return null;
     }
 }
 
-async function searchOMDB(query, page = 1) {
+async function searchOMDB(query) {
     try {
-        const url = `https://www.omdbapi.com/?s=${encodeURIComponent(query)}&apikey=${process.env.OMDB_API_KEY}&page=${page}`;
+        const url = `https://www.omdbapi.com/?s=${encodeURIComponent(query)}&apikey=${process.env.OMDB_API_KEY}&type=movie`;
         const response = await fetch(url);
         const data = await response.json();
         return data;
     } catch (error) {
         console.error('OMDB Search Error:', error);
-        throw error;
+        return { Search: [] };
     }
 }
 
@@ -82,20 +79,20 @@ async function getOMDBDetails(imdbId) {
         return data;
     } catch (error) {
         console.error('OMDB Details Error:', error);
-        throw error;
+        return null;
     }
 }
 
 app.get('/api/search', async (req, res) => {
     try {
-        const { query } = req.query;
+        const { query, page = 1 } = req.query;
         if (!query) {
             return res.status(400).json({ error: 'Search query is required' });
         }
 
         const [omdbData, tmdbData] = await Promise.all([
             searchOMDB(query),
-            searchTMDB(query)
+            searchTMDB(query, page)
         ]);
 
         const tmdbDetails = await Promise.all(
@@ -105,8 +102,8 @@ app.get('/api/search', async (req, res) => {
         const enrichedResults = [];
         const processedTitles = new Set();
 
-        // Process TMDB results first
         for (const tmdbMovie of tmdbDetails) {
+            if (!tmdbMovie) continue;
             const normalizedTitle = tmdbMovie.title.toLowerCase();
             if (!processedTitles.has(normalizedTitle)) {
                 processedTitles.add(normalizedTitle);
@@ -129,7 +126,6 @@ app.get('/api/search', async (req, res) => {
             }
         }
 
-        // Add OMDB results
         if (omdbData.Search) {
             for (const omdbMovie of omdbData.Search) {
                 const normalizedTitle = omdbMovie.Title.toLowerCase();
@@ -138,35 +134,44 @@ app.get('/api/search', async (req, res) => {
                 );
 
                 if (existingMovie) {
-                    existingMovie.omdbData = await getOMDBDetails(omdbMovie.imdbID);
+                    const omdbDetails = await getOMDBDetails(omdbMovie.imdbID);
+                    if (omdbDetails) {
+                        existingMovie.omdbData = omdbDetails;
+                    }
                 } else {
                     const details = await getOMDBDetails(omdbMovie.imdbID);
-                    enrichedResults.push({
-                        title: omdbMovie.Title,
-                        year: omdbMovie.Year,
-                        Poster: omdbMovie.Poster,
-                        omdbData: details,
-                        recommendationScore: Math.round(
-                            (parseFloat(details.imdbRating || 0) * 10) +
-                            (parseInt(details.imdbVotes?.replace(/,/g, '') || 0) * 0.001)
-                        )
-                    });
+                    if (details) {
+                        enrichedResults.push({
+                            title: omdbMovie.Title,
+                            year: omdbMovie.Year,
+                            Poster: omdbMovie.Poster,
+                            omdbData: details,
+                            recommendationScore: Math.round(
+                                (parseFloat(details.imdbRating || 0) * 10) +
+                                (parseInt(details.imdbVotes?.replace(/,/g, '') || 0) * 0.001)
+                            )
+                        });
+                    }
                 }
             }
         }
 
-        // Sort by recommendation score
         enrichedResults.sort((a, b) => b.recommendationScore - a.recommendationScore);
 
         res.json({
             totalResults: enrichedResults.length,
             Search: enrichedResults,
-            currentPage: 1,
+            currentPage: parseInt(page),
             hasMore: false
         });
     } catch (error) {
         console.error('Proxy server error:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        res.status(500).json({
+            error: 'Internal server error',
+            message: error.message,
+            totalResults: 0,
+            Search: []
+        });
     }
 });
 
