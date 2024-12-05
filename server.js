@@ -28,6 +28,13 @@ app.listen(port, () => {
 });
 
 async function queryMovieDatabase(query) {
+  if (!query) {
+    return {
+      totalResults: 0,
+      results: []
+    };
+  }
+  
   return {
     totalResults: 500,
     results: [
