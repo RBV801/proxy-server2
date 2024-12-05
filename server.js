@@ -1,36 +1,48 @@
+require('dotenv').config();
 const express = require('express');
-const app = express();
-const port = 3001;
+const cors = require('cors');
+const mongoose = require('mongoose');
+const feedbackRoutes = require('./routes/feedback');
 
-// Add new route to handle search requests
+const app = express();
+const PORT = process.env.PORT || 3001;
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+
+// MongoDB Connection
+mongoose.connect(process.env.MONGODB_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+})
+.then(() => console.log('Connected to MongoDB'))
+.catch(err => console.error('MongoDB connection error:', err));
+
+// Routes
+app.use('/api/feedback', feedbackRoutes);
+
+// Search endpoint
 app.get('/api/search', async (req, res) => {
   try {
-    // Query the movie database and return the JSON response
-    const searchResults = await queryMovieDatabase(req.query.q);
-    res.json(searchResults);
+    const { query, page = 1 } = req.query;
+    const response = await fetch(
+      `http://www.omdbapi.com/?apikey=${process.env.OMDB_API_KEY}&s=${encodeURIComponent(query)}&page=${page}`
+    );
+    const data = await response.json();
+    res.json(data);
   } catch (error) {
-    console.error('Error during search:', error);
-    res.status(500).json({ error: 'An error occurred while processing the search request.' });
+    console.error('Search error:', error);
+    res.status(500).json({ error: 'Failed to process search request' });
   }
 });
 
+// Error handling
 app.use((err, req, res, next) => {
-  console.error('Global error handler:', err);
-  res.status(500).json({ error: 'An unexpected error occurred.' });
+  console.error(err.stack);
+  res.status(500).send('Something broke!');
 });
 
-app.listen(port, () => {
-  console.log(`Server is running on port ${port}`);
+app.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
 });
-
-// Placeholder function to query the movie database
-async function queryMovieDatabase(query) {
-  // Implement logic to query the movie database and return the search results
-  return {
-    totalResults: 500,
-    results: [
-      { id: 1, title: 'The Wizard of Oz', year: 1939, actors: ['Judy Garland'] },
-      { id: 2, title: 'A Star Is Born', year: 1954, actors: ['Judy Garland'] }
-    ]
-  };
-}
