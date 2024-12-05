@@ -1,53 +1,33 @@
+
 const express = require('express');
-const cors = require('cors');
-const { MongoClient, ServerApiVersion } = require('mongodb');
-require('dotenv').config();
-
 const app = express();
-const PORT = process.env.PORT || 3001;
+const port = 3000;
 
-// Middleware
-app.use(cors());
-app.use(express.json());
-
-// MongoDB Connection
-const uri = process.env.MONGODB_URI;
-const client = new MongoClient(uri, {
-  serverApi: {
-    version: ServerApiVersion.v1,
-    strict: true,
-    deprecationErrors: true,
-  }
-});
-
-async function connectToMongo() {
+// Add new route to handle search requests
+app.get('/api/search', async (req, res) => {
   try {
-    await client.connect();
-    await client.db('admin').command({ ping: 1 });
-    console.log('Successfully connected to MongoDB!');
+    // Query the movie database and return the JSON response
+    const searchResults = await queryMovieDatabase(req.query.q);
+    res.json(searchResults);
   } catch (error) {
-    console.error('MongoDB connection error:', error);
-    process.exit(1);
+    console.error('Error during search:', error);
+    res.status(500).json({ error: 'An error occurred while processing the search request.' });
   }
+});
+
+app.listen(port, () => {
+  console.log(`Server is running on port ${port}`);
+});
+
+// Placeholder function to query the movie database
+async function queryMovieDatabase(query) {
+  // Implement logic to query the movie database and return the search results
+  return {
+    totalResults: 500,
+    results: [
+      { id: 1, title: 'The Wizard of Oz', year: 1939, actors: ['Judy Garland'] },
+      { id: 2, title: 'A Star Is Born', year: 1954, actors: ['Judy Garland'] },
+      // Add more sample search results
+    ]
+  };
 }
-
-connectToMongo().catch(console.dir);
-
-// Routes
-const feedbackRoutes = require('./routes/feedback');
-app.use('/api/feedback', feedbackRoutes);
-
-// Error handling middleware
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).send('Something broke!');
-});
-
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-});
-
-process.on('SIGINT', async () => {
-  await client.close();
-  process.exit(0);
-});
